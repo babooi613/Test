@@ -3,6 +3,8 @@
     python -m memebot run    [--config config.toml] [--once] [--live]
     python -m memebot scan   [--config config.toml] [--all]
     python -m memebot status [--config config.toml]
+    python -m memebot snipe  [--config config.toml] [--live]   # real-time Mayhem sniper
+    python -m memebot snipe-status [--config config.toml]
 """
 
 from __future__ import annotations
@@ -88,21 +90,76 @@ def cmd_status(args, cfg) -> int:
     return 0
 
 
+def cmd_snipe(args, cfg) -> int:
+    import asyncio
+
+    from .pumpportal import PumpPortalExecutor, PumpPortalFeed
+    from .sniper import PaperSnipeExecutor, SnipeBook, SniperEngine
+
+    s = cfg.sniper
+    live = cfg.general.mode == "live"
+    if live != bool(args.live):
+        print("Live sniping needs BOTH general.mode = \"live\" in the config AND the --live flag.")
+        return 2
+    executor = PumpPortalExecutor(s, cfg.live) if live else PaperSnipeExecutor(s)
+    book = SnipeBook.load(s.state_file, 0.0 if live else s.paper_starting_sol)
+    engine = SniperEngine(s, executor, book, paper=not live, kill_switch_file=cfg.general.kill_switch_file)
+    feed = PumpPortalFeed(s.feed_url, engine)
+    logging.getLogger(__name__).info(
+        "Sniping %s launches in %s mode: %.4f SOL per trade, TP +%.0f%% / SL -%.0f%% / max hold %.0fs",
+        "Mayhem" if s.only_mayhem else "all pump.fun", "LIVE" if live else "PAPER",
+        s.buy_sol, s.take_profit_pct, s.stop_loss_pct, s.max_hold_sec,
+    )
+    try:
+        asyncio.run(feed.run())
+    except KeyboardInterrupt:
+        book.save(s.state_file)
+        print("\nStopped. State saved.")
+    return 0
+
+
+def cmd_snipe_status(args, cfg) -> int:
+    from .sniper import SnipeBook
+
+    s = cfg.sniper
+    book = SnipeBook.load(s.state_file, s.paper_starting_sol)
+    now = time.time()
+    total = sum(t.pnl_sol for t in book.closed)
+    wins = sum(1 for t in book.closed if t.pnl_sol > 0)
+    print(f"SOL balance (paper) / net flow (live): {book.sol_balance:.4f}")
+    print(f"PnL today: {book.pnl_today(now):+.4f} SOL   all-time: {total:+.4f} SOL")
+    if book.closed:
+        print(f"Trades: {len(book.closed)}  win rate: {wins / len(book.closed):.0%}")
+    print("\nOpen positions:")
+    for p in book.positions.values():
+        print(f"  {p.symbol:<10} {p.cost_sol:.4f} SOL  held {now - p.opened_at:.0f}s  {p.mint}")
+    if not book.positions:
+        print("  (none)")
+    print("\nLast 15 trades:")
+    for t in book.closed[-15:]:
+        print(f"  {t.symbol:<10} {t.pnl_sol:+.4f} SOL ({t.pnl_pct:+6.1f}%) {t.closed_at - t.opened_at:4.0f}s  {t.reason}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="memebot", description="Solana memecoin trading bot")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("run", "scan", "status"):
+    for name in ("run", "scan", "status", "snipe", "snipe-status"):
         sp = sub.add_parser(name)
         sp.add_argument("--config", "-c", default=None, help="Path to config TOML")
+        if name in ("run", "snipe"):
+            sp.add_argument("--live", action="store_true", help="Confirm live trading with real funds")
         if name == "run":
             sp.add_argument("--once", action="store_true", help="Run a single tick and exit")
-            sp.add_argument("--live", action="store_true", help="Confirm live trading with real funds")
         if name == "scan":
             sp.add_argument("--all", action="store_true", help="Also show rejected tokens")
     args = parser.parse_args(argv)
     cfg = load_config(args.config)
     _setup_logging(cfg.general.log_level)
-    return {"run": cmd_run, "scan": cmd_scan, "status": cmd_status}[args.command](args, cfg)
+    return {
+        "run": cmd_run, "scan": cmd_scan, "status": cmd_status,
+        "snipe": cmd_snipe, "snipe-status": cmd_snipe_status,
+    }[args.command](args, cfg)
 
 
 if __name__ == "__main__":

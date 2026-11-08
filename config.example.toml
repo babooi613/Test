@@ -65,3 +65,52 @@ priority_fee_lamports = "auto"
 private_key_env = "MEMEBOT_PRIVATE_KEY"            # env var holding base58 key or path to id.json
 min_sol_reserve = 0.02
 confirm_timeout_sec = 60
+
+# ---------------------------------------------------------------------------
+# Real-time sniper for pump.fun Mayhem coins:  python -m memebot snipe
+# All amounts are in SOL. Exits are re-checked on EVERY trade tick.
+# ---------------------------------------------------------------------------
+[sniper]
+feed_url = "wss://pumpportal.fun/api/data"
+trade_api_url = "https://pumpportal.fun/api/trade-local"
+state_file = "state/sniper.json"
+only_mayhem = true
+mayhem_keys = ["isMayhemMode", "is_mayhem_mode", "mayhemMode", "mayhem"]
+creator_blacklist = []
+
+# entry: only buy launches whose first seconds look like organic demand
+min_age_sec = 3.0
+max_age_sec = 45.0
+min_buys = 8
+min_unique_buyers = 6
+min_buy_volume_sol = 1.5
+min_buy_volume_ratio = 0.70
+max_top_buyer_share = 0.40
+min_mcap_sol = 0.0
+max_mcap_sol = 150.0
+max_gain_since_launch_pct = 150.0
+require_dev_holding = true
+
+# exits
+take_profit_pct = 35.0
+stop_loss_pct = 20.0
+trailing_activation_pct = 20.0
+trailing_stop_pct = 12.0
+max_hold_sec = 120.0
+exit_on_dev_sell = true
+
+# sizing & risk
+buy_sol = 0.05
+max_open_positions = 3
+daily_loss_limit_sol = 0.5
+watch_ttl_sec = 90.0
+
+# paper simulation
+paper_starting_sol = 5.0
+paper_fee_pct = 1.25
+paper_latency_slippage_pct = 3.0
+
+# live execution (uses [live] rpc_url / private_key_env / min_sol_reserve too)
+slippage_pct = 15
+priority_fee_sol = 0.0005
+pool = "auto"

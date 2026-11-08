@@ -1,3 +1,4 @@
 requests>=2.31
+websockets>=12   # real-time pump.fun feed (snipe mode)
 # Only needed for live trading (transaction signing):
 solders>=0.21

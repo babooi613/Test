@@ -91,8 +91,61 @@ class LiveConfig:
 
 
 @dataclass
+class SniperConfig:
+    """Real-time pump.fun launch sniper (Mayhem coins). All amounts in SOL."""
+
+    feed_url: str = "wss://pumpportal.fun/api/data"
+    trade_api_url: str = "https://pumpportal.fun/api/trade-local"
+    state_file: str = "state/sniper.json"
+    only_mayhem: bool = True
+    # Field names checked on the new-token event to detect Mayhem mode.
+    mayhem_keys: list[str] = field(
+        default_factory=lambda: ["isMayhemMode", "is_mayhem_mode", "mayhemMode", "mayhem"]
+    )
+    creator_blacklist: list[str] = field(default_factory=list)
+
+    # --- entry: watch a fresh launch, buy only if early flow looks organic ---
+    min_age_sec: float = 3.0
+    max_age_sec: float = 45.0
+    min_buys: int = 8
+    min_unique_buyers: int = 6
+    min_buy_volume_sol: float = 1.5
+    min_buy_volume_ratio: float = 0.70  # buy SOL / (buy SOL + sell SOL)
+    max_top_buyer_share: float = 0.40  # one wallet (excl. dev) of total buy SOL
+    min_mcap_sol: float = 0.0
+    max_mcap_sol: float = 150.0
+    max_gain_since_launch_pct: float = 150.0  # don't chase vertical candles
+    require_dev_holding: bool = True  # skip if creator has sold anything
+
+    # --- exits (checked on every trade tick) ---
+    take_profit_pct: float = 35.0
+    stop_loss_pct: float = 20.0
+    trailing_activation_pct: float = 20.0
+    trailing_stop_pct: float = 12.0
+    max_hold_sec: float = 120.0
+    exit_on_dev_sell: bool = True
+
+    # --- sizing & risk ---
+    buy_sol: float = 0.05
+    max_open_positions: int = 3
+    daily_loss_limit_sol: float = 0.5
+    watch_ttl_sec: float = 90.0  # stop tracking unbought launches after this
+
+    # --- paper simulation ---
+    paper_starting_sol: float = 5.0
+    paper_fee_pct: float = 1.25  # pump.fun trading fee (approx.)
+    paper_latency_slippage_pct: float = 3.0  # you are not the fastest bot
+
+    # --- live execution (PumpPortal local-signing API) ---
+    slippage_pct: int = 15
+    priority_fee_sol: float = 0.0005
+    pool: str = "auto"
+
+
+@dataclass
 class Config:
     general: GeneralConfig = field(default_factory=GeneralConfig)
+    sniper: SniperConfig = field(default_factory=SniperConfig)
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     filters: FilterConfig = field(default_factory=FilterConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)

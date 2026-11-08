@@ -93,6 +93,61 @@ the key never leaves your computer. A swap is refused if Jupiter's quoted price
 impact is above `max_price_impact_pct`, and `min_sol_reserve` SOL is always kept
 back for fees.
 
+## Snipe mode: real-time pump.fun Mayhem coins
+
+`python -m memebot snipe` is a second, much faster bot for the "Mayhem" tab:
+coins that are seconds old, with market caps from a few hundred to a few thousand dollars.
+It does not poll. It keeps one websocket open to PumpPortal, sees every new
+pump.fun launch as it happens, streams every trade for the coins it watches, and
+**re-checks its exits on every single trade**.
+
+```bash
+python -m memebot snipe -c config.toml          # paper (default, simulated SOL)
+python -m memebot snipe-status -c config.toml   # PnL, win rate, recent trades
+python -m memebot snipe -c config.toml --live   # real SOL (also needs mode = "live")
+```
+
+**Lifecycle of one coin**
+
+1. **Launch.** A new token event arrives. If `only_mayhem = true`, coins
+   without a Mayhem flag are ignored. Otherwise the bot starts watching the coin.
+2. **Watch window** (`min_age_sec` to `max_age_sec`, default 3–45s). On each
+   trade it updates the bonding-curve price, buy/sell counts, SOL volume,
+   unique buyers, and how much of the buying comes from the single biggest wallet.
+3. **Entry.** It buys `buy_sol` once all of these are true: ≥ 8 buys from
+   ≥ 6 different wallets, ≥ 1.5 SOL of buy volume, ≥ 70% of volume is buys, no
+   single wallet is > 40% of buying (bundles and self-pumps), the dev hasn't
+   sold, and the price is not already +150% since launch. It gets **one shot
+   per coin**.
+4. **Exit**, checked on every trade:
+   - `dev_sold`: the creator sold anything
+   - `stop_loss`: −20%
+   - `take_profit`: +35%
+   - `trailing_stop`: after +20%, sell if it drops 12% from the peak
+   - `max_hold`: 120 seconds (checked every second even with no trades)
+5. Coins that never qualify are dropped after `watch_ttl_sec`.
+
+Buys and sells run in background threads, so a slow transaction never stalls
+the feed. Daily loss limit, max open positions and the `STOP` kill switch all
+still apply.
+
+**Paper mode is deliberately pessimistic.** Fills are calculated on the actual
+bonding curve, with the pump.fun fee and an extra 3% `paper_latency_slippage_pct`
+on each side. Professional snipers run co-located with Jito bundles and will
+nearly always be in before you and out before you. If a config is only
+profitable in paper with that haircut set to 0, it won't work live.
+
+**Mayhem detection.** The bot looks for a flag on the new-token event under the
+names in `mayhem_keys`. I couldn't confirm from here which field name PumpPortal
+uses for Mayhem coins (if it sends one at all). If the bot logs *"none flagged
+as Mayhem"* after 200 launches, check a raw event and update `mayhem_keys`, or
+set `only_mayhem = false` to trade every pump.fun launch with the same filters.
+
+**Live execution** uses PumpPortal's `trade-local` API: PumpPortal builds the
+transaction, your machine signs it, and it is sent through your own RPC. Your
+key is never uploaded. Use a fast paid RPC, and raise `priority_fee_sol` if
+your transactions land late.
+
 ## Tuning tips
 
 - Start with `scan --all` to see why tokens are rejected, then loosen or
@@ -116,6 +171,8 @@ memebot/
   portfolio.py  positions, PnL, cooldowns, persistence
   execution.py  PaperExecutor, JupiterExecutor (Solana live trading)
   bot.py        main loop + risk management
+  sniper.py     real-time launch sniper: entry/exit rules, paper curve fills, engine
+  pumpportal.py PumpPortal websocket feed + live pump.fun executor
   __main__.py   CLI (run / scan / status)
 tests/          pytest suite (offline, uses fake market data)
 ```
