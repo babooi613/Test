@@ -1,0 +1,67 @@
+# memebot configuration. Copy to config.toml and adjust.
+# Every value shown is the default; delete any line you don't want to change.
+
+[general]
+mode = "paper"              # "paper" (simulated) or "live" (real funds, also needs --live)
+poll_interval_sec = 30
+state_file = "state/state.json"
+log_level = "INFO"
+kill_switch_file = "STOP"   # `touch STOP` to pause new entries; bot exits once flat
+
+[discovery]
+chain = "solana"
+use_latest_profiles = true  # DexScreener latest token profiles
+use_latest_boosts = true    # DexScreener latest boosted tokens
+watchlist = []              # token mint addresses to always evaluate
+max_candidates_per_tick = 60
+
+[filters]
+min_liquidity_usd = 20000
+max_liquidity_usd = 5000000
+min_fdv_usd = 50000
+max_fdv_usd = 20000000
+min_age_minutes = 15        # skip the first minutes after launch (snipers / bundles)
+max_age_hours = 72
+min_volume_h1_usd = 10000
+min_txns_h1 = 100
+min_buy_ratio_h1 = 0.55
+min_price_change_h1 = 0.0
+max_price_change_h1 = 300.0
+max_price_change_m5 = 40.0
+allowed_quote_symbols = ["SOL", "USDC"]
+blacklist = []
+use_rugcheck = true         # query rugcheck.xyz before buying
+rugcheck_max_score = 1000
+rugcheck_reject_danger = true
+
+[strategy]
+min_score = 55.0
+take_profit_pct = 100.0
+stop_loss_pct = 25.0
+trailing_activation_pct = 40.0
+trailing_stop_pct = 20.0
+max_hold_minutes = 240
+liquidity_drop_exit_pct = 50.0
+cooldown_minutes = 120
+
+[risk]
+position_size_usd = 25.0
+max_open_positions = 4
+max_total_exposure_usd = 100.0
+daily_loss_limit_usd = 50.0
+max_entries_per_tick = 1
+
+[paper]
+starting_cash_usd = 1000.0
+slippage_pct = 1.5
+fee_pct = 0.5
+
+[live]
+rpc_url = "https://api.mainnet-beta.solana.com"   # use a private RPC (Helius, Triton, ...) for reliability
+jupiter_base_url = "https://lite-api.jup.ag"
+slippage_bps = 300
+max_price_impact_pct = 3.0
+priority_fee_lamports = "auto"
+private_key_env = "MEMEBOT_PRIVATE_KEY"            # env var holding base58 key or path to id.json
+min_sol_reserve = 0.02
+confirm_timeout_sec = 60

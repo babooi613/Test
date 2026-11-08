@@ -1,0 +1,3 @@
+requests>=2.31
+# Only needed for live trading (transaction signing):
+solders>=0.21
