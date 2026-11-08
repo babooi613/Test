@@ -137,11 +137,16 @@ on each side. Professional snipers run co-located with Jito bundles and will
 nearly always be in before you and out before you. If a config is only
 profitable in paper with that haircut set to 0, it won't work live.
 
-**Mayhem detection.** The bot looks for a flag on the new-token event under the
-names in `mayhem_keys`. I couldn't confirm from here which field name PumpPortal
-uses for Mayhem coins (if it sends one at all). If the bot logs *"none flagged
-as Mayhem"* after 200 launches, check a raw event and update `mayhem_keys`, or
-set `only_mayhem = false` to trade every pump.fun launch with the same filters.
+**Mayhem detection.** pump.fun records Mayhem mode on-chain. `create_v2` sets
+`is_mayhem_mode` on the coin's bonding-curve account, and it never changes after
+that (see the official IDL in
+[pump-fun/pump-public-docs](https://github.com/pump-fun/pump-public-docs), `idl/pump.json`).
+If the PumpPortal event already includes a flag (under any of the names in
+`mayhem_keys`), the bot uses it. Otherwise it watches the coin while reading byte 81
+of the bonding-curve account through `[live] rpc_url`. Coins that turn out not to be
+Mayhem are dropped. Coins whose status can't be confirmed are **never bought**.
+Each launch costs one `getAccountInfo` call, so on busy days use a paid RPC.
+Set `only_mayhem = false` to trade every pump.fun launch with the same filters.
 
 **Live execution** uses PumpPortal's `trade-local` API: PumpPortal builds the
 transaction, your machine signs it, and it is sent through your own RPC. Your
@@ -173,6 +178,7 @@ memebot/
   bot.py        main loop + risk management
   sniper.py     real-time launch sniper: entry/exit rules, paper curve fills, engine
   pumpportal.py PumpPortal websocket feed + live pump.fun executor
+  pumpchain.py  on-chain pump.fun reads (Mayhem flag from the bonding curve)
   __main__.py   CLI (run / scan / status)
 tests/          pytest suite (offline, uses fake market data)
 ```

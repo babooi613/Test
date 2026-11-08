@@ -247,3 +247,90 @@ def test_feed_end_to_end_with_local_websocket(tmp_path):
         assert received[1] == {"method": "subscribeTokenTrade", "keys": [c.mint]}
         assert book.closed and book.closed[0].reason.startswith("take_profit")
     asyncio.run(go())
+
+
+# ---------------------------------------------------------------- on-chain Mayhem flag
+def _bonding_curve_bytes(mayhem: bool) -> bytes:
+    import struct
+    from memebot.pumpchain import BONDING_CURVE_DISCRIMINATOR
+    return (BONDING_CURVE_DISCRIMINATOR
+            + struct.pack("<5Q", 1_073_000_000_000_000, 30_000_000_000, 793_100_000_000_000, 0, 10**15)
+            + b"\x00"                      # complete
+            + bytes(range(32))             # creator pubkey
+            + (b"\x01" if mayhem else b"\x00")  # is_mayhem_mode
+            + b"\x00" * 120)               # remaining fields
+
+
+def test_parse_is_mayhem_from_account_bytes():
+    from memebot.pumpchain import parse_is_mayhem
+    assert parse_is_mayhem(_bonding_curve_bytes(True)) is True
+    assert parse_is_mayhem(_bonding_curve_bytes(False)) is False
+    assert parse_is_mayhem(b"\x00" * 200) is None  # wrong discriminator
+    assert parse_is_mayhem(_bonding_curve_bytes(True)[:60]) is None  # truncated
+
+
+def test_mayhem_checker_via_rpc():
+    import base64
+    from memebot.pumpchain import MayhemChecker
+
+    class FakeHttp:
+        def __init__(self):
+            self.calls = 0
+
+        def post(self, url, json):
+            self.calls += 1
+            data = base64.b64encode(_bonding_curve_bytes(True)).decode()
+            return {"result": {"value": {"data": [data, "base64"]}}}
+
+    http = FakeHttp()
+    chk = MayhemChecker("http://rpc", http=http)
+    assert chk.is_mayhem("M", "CURVE") is True
+    assert chk.is_mayhem("M", "CURVE") is True and http.calls == 1  # cached
+
+
+def test_bonding_curve_pda_derivation():
+    pytest.importorskip("solders")
+    from memebot.pumpchain import bonding_curve_address
+    a = bonding_curve_address("So11111111111111111111111111111111111111112")
+    assert a == bonding_curve_address("So11111111111111111111111111111111111111112") and len(a) >= 32
+
+
+class FakeChecker:
+    def __init__(self, answers):
+        self.answers = answers
+
+    def is_mayhem(self, mint, bonding_curve=""):
+        return self.answers.get(mint)
+
+
+def test_engine_confirms_mayhem_onchain_when_feed_has_no_flag(tmp_path):
+    async def go():
+        clock = [T0]
+        cfg, book, eng = make_engine(tmp_path, clock)
+        eng.mayhem_checker = FakeChecker({"YES": True, "NO": False})
+        yes, no = Curve("YES"), Curve("NO")
+        ev_yes, ev_no = yes.create(), no.create()
+        del ev_yes["isMayhemMode"], ev_no["isMayhemMode"]  # feed without the flag
+        await eng.on_event(ev_yes)
+        await eng.on_event(ev_no)
+        await eng.drain()
+        assert eng.watches["YES"].mayhem is True
+        assert "NO" not in eng.watches  # confirmed non-Mayhem -> dropped
+        await organic_pump(eng, yes, clock)
+        assert "YES" in book.positions
+    asyncio.run(go())
+
+
+def test_engine_never_buys_unconfirmed(tmp_path):
+    async def go():
+        clock = [T0]
+        cfg, book, eng = make_engine(tmp_path, clock)
+        eng.mayhem_checker = FakeChecker({})  # RPC can't tell
+        c = Curve("UNK")
+        ev = c.create()
+        del ev["isMayhemMode"]
+        await eng.on_event(ev)
+        await eng.drain()
+        await organic_pump(eng, c, clock)
+        assert book.positions == {}
+    asyncio.run(go())

@@ -34,16 +34,16 @@ def _f(v: Any) -> float:
         return 0.0
 
 
-def is_mayhem(event: dict[str, Any], keys: list[str]) -> bool:
+def is_mayhem(event: dict[str, Any], keys: list[str]) -> bool | None:
+    """Mayhem flag from the feed event; None if the event doesn't carry one."""
     for k in keys:
-        v = event.get(k)
-        if isinstance(v, bool):
-            return v
-        if isinstance(v, str) and v.lower() in ("true", "1", "yes"):
-            return True
-        if isinstance(v, (int, float)) and v:
-            return True
-    return False
+        if k not in event or event[k] is None:
+            continue
+        v = event[k]
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "1", "yes")
+        return bool(v)
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -56,7 +56,8 @@ class TokenWatch:
     name: str
     creator: str
     created_at: float
-    mayhem: bool
+    mayhem: bool | None  # None = not yet known (pending on-chain check)
+    bonding_curve: str = ""
     v_sol: float = 0.0
     v_tokens: float = 0.0
     mcap_sol: float = 0.0
@@ -107,6 +108,7 @@ class TokenWatch:
             creator=ev.get("traderPublicKey", ""),
             created_at=now,
             mayhem=is_mayhem(ev, mayhem_keys),
+            bonding_curve=ev.get("bondingCurveKey", "") or "",
             last_trade_at=now,
         )
         w._update_curve(ev)
@@ -141,8 +143,8 @@ def entry_rejections(w: TokenWatch, cfg: SniperConfig, now: float) -> list[str]:
         r.append(f"too early ({age:.1f}s)")
     if age > cfg.max_age_sec:
         r.append(f"window closed ({age:.0f}s)")
-    if cfg.only_mayhem and not w.mayhem:
-        r.append("not mayhem")
+    if cfg.only_mayhem and w.mayhem is not True:
+        r.append("not mayhem" if w.mayhem is False else "mayhem unconfirmed")
     if w.creator in cfg.creator_blacklist:
         r.append("blacklisted creator")
     if cfg.require_dev_holding and w.dev_sold:
@@ -324,13 +326,15 @@ class SniperEngine:
     """
 
     def __init__(self, cfg: SniperConfig, executor: SnipeExecutor, book: SnipeBook,
-                 paper: bool = True, kill_switch_file: str = "STOP", clock=time.time):
+                 paper: bool = True, kill_switch_file: str = "STOP", clock=time.time,
+                 mayhem_checker=None):
         self.cfg = cfg
         self.executor = executor
         self.book = book
         self.paper = paper
         self.kill_switch_file = kill_switch_file
         self.clock = clock
+        self.mayhem_checker = mayhem_checker  # has .is_mayhem(mint, bonding_curve) -> bool | None
         self.watches: dict[str, TokenWatch] = {}
         self.pending: set[str] = set()  # mints with an in-flight order
         self.tasks: set[asyncio.Task] = set()
@@ -355,22 +359,49 @@ class SniperEngine:
         self.stats["launches"] += 1
         if w.mayhem:
             self.stats["mayhem"] += 1
-        elif (self.cfg.only_mayhem and not self._warned_no_mayhem
-              and self.stats["launches"] >= 200 and self.stats["mayhem"] == 0):
-            self._warned_no_mayhem = True
-            log.warning(
-                "Seen %d launches but none flagged as Mayhem via keys %s. The feed may not expose "
-                "the flag under these names - adjust sniper.mayhem_keys or set only_mayhem=false.",
-                self.stats["launches"], self.cfg.mayhem_keys,
-            )
-        if self.cfg.only_mayhem and not w.mayhem:
-            return
+        self._maybe_warn_no_mayhem()
+        if self.cfg.only_mayhem:
+            if w.mayhem is False:
+                return
+            if w.mayhem is None:
+                if self.mayhem_checker is None:
+                    return
+                # Feed didn't say: watch provisionally and read the flag on-chain.
+                self._spawn(self._resolve_mayhem(w))
         if w.creator in self.cfg.creator_blacklist:
             return
         self.watches[w.mint] = w
         log.debug("Watching %s (%s) mcap=%.1f SOL", w.symbol, w.mint, w.mcap_sol)
         if self.subscribe:
             await self.subscribe([w.mint])
+
+    def _maybe_warn_no_mayhem(self) -> None:
+        if (self.cfg.only_mayhem and not self._warned_no_mayhem
+                and self.stats["launches"] >= 300 and self.stats["mayhem"] == 0):
+            self._warned_no_mayhem = True
+            log.warning(
+                "Seen %d launches but none confirmed as Mayhem. Check that [live] rpc_url works "
+                "(used for the on-chain check) or set sniper.only_mayhem = false.",
+                self.stats["launches"],
+            )
+
+    async def _resolve_mayhem(self, w: TokenWatch) -> None:
+        try:
+            result = await asyncio.to_thread(self.mayhem_checker.is_mayhem, w.mint, w.bonding_curve)
+        except Exception:  # noqa: BLE001
+            log.exception("Mayhem check failed for %s", w.mint)
+            return
+        if w.mayhem is not None:  # resolved elsewhere meanwhile
+            return
+        w.mayhem = result
+        if result:
+            self.stats["mayhem"] += 1
+            log.debug("Confirmed Mayhem on-chain: %s (%s)", w.symbol, w.mint)
+            self._check_entry(w, self.clock())
+        elif result is False and w.mint not in self.book.positions:
+            self.watches.pop(w.mint, None)
+            if self.unsubscribe:
+                await self.unsubscribe([w.mint])
 
     def on_trade(self, ev: dict[str, Any]) -> None:
         now = self.clock()

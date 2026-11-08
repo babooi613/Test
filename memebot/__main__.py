@@ -103,7 +103,13 @@ def cmd_snipe(args, cfg) -> int:
         return 2
     executor = PumpPortalExecutor(s, cfg.live) if live else PaperSnipeExecutor(s)
     book = SnipeBook.load(s.state_file, 0.0 if live else s.paper_starting_sol)
-    engine = SniperEngine(s, executor, book, paper=not live, kill_switch_file=cfg.general.kill_switch_file)
+    checker = None
+    if s.only_mayhem and s.mayhem_check_onchain:
+        from .pumpchain import MayhemChecker
+
+        checker = MayhemChecker(cfg.live.rpc_url)
+    engine = SniperEngine(s, executor, book, paper=not live,
+                          kill_switch_file=cfg.general.kill_switch_file, mayhem_checker=checker)
     feed = PumpPortalFeed(s.feed_url, engine)
     logging.getLogger(__name__).info(
         "Sniping %s launches in %s mode: %.4f SOL per trade, TP +%.0f%% / SL -%.0f%% / max hold %.0fs",

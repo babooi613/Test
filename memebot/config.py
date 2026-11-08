@@ -102,6 +102,9 @@ class SniperConfig:
     mayhem_keys: list[str] = field(
         default_factory=lambda: ["isMayhemMode", "is_mayhem_mode", "mayhemMode", "mayhem"]
     )
+    # If the feed event has no Mayhem flag, read is_mayhem_mode from the coin's
+    # bonding-curve account on-chain (uses [live] rpc_url).
+    mayhem_check_onchain: bool = True
     creator_blacklist: list[str] = field(default_factory=list)
 
     # --- entry: watch a fresh launch, buy only if early flow looks organic ---

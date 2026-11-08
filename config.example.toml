@@ -76,6 +76,7 @@ trade_api_url = "https://pumpportal.fun/api/trade-local"
 state_file = "state/sniper.json"
 only_mayhem = true
 mayhem_keys = ["isMayhemMode", "is_mayhem_mode", "mayhemMode", "mayhem"]
+mayhem_check_onchain = true   # read is_mayhem_mode from the bonding curve via [live] rpc_url
 creator_blacklist = []
 
 # entry: only buy launches whose first seconds look like organic demand
