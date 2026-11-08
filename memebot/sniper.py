@@ -69,6 +69,8 @@ class TokenWatch:
     buyer_sol: dict[str, float] = field(default_factory=dict)
     dev_sold: bool = False
     last_trade_at: float = 0.0
+    peak_price: float = 0.0
+    last_rejections: list[str] = field(default_factory=list)
 
     @property
     def price(self) -> float:
@@ -95,6 +97,7 @@ class TokenWatch:
         vs, vt = _f(ev.get("vSolInBondingCurve")), _f(ev.get("vTokensInBondingCurve"))
         if vs > 0 and vt > 0:
             self.v_sol, self.v_tokens = vs, vt
+            self.peak_price = max(self.peak_price, vs / vt)
         mc = _f(ev.get("marketCapSol"))
         if mc > 0:
             self.mcap_sol = mc
@@ -423,7 +426,15 @@ class SniperEngine:
             and w.age(now) > max(self.cfg.watch_ttl_sec, self.cfg.max_age_sec)
         ]
         for m in stale:
-            del self.watches[m]
+            w = self.watches.pop(m)
+            if w.mayhem and m not in self.book.attempted:
+                lp = w.launch_price or 1
+                log.info(
+                    "PASSED %-10s buys=%d sells=%d buyers=%d vol=%.2f SOL peak=%+.0f%% now=%+.0f%% dev_sold=%s | %s",
+                    w.symbol, w.buys, w.sells, w.unique_buyers, w.buy_sol,
+                    (w.peak_price / lp - 1) * 100, (w.price / lp - 1) * 100, w.dev_sold,
+                    "; ".join(w.last_rejections[:3]) or "no trades in window",
+                )
         if stale and self.unsubscribe:
             await self.unsubscribe(stale)
 
@@ -443,7 +454,12 @@ class SniperEngine:
     def _check_entry(self, w: TokenWatch, now: float) -> None:
         if w.mint in self.book.attempted or w.mint in self.pending:
             return
-        if entry_rejections(w, self.cfg, now) or self.entry_block_reason(now):
+        rej = entry_rejections(w, self.cfg, now)
+        if rej:
+            if not any(x.startswith("too early") for x in rej):
+                w.last_rejections = rej
+            return
+        if self.entry_block_reason(now):
             return
         self.book.attempted.add(w.mint)
         self.pending.add(w.mint)
