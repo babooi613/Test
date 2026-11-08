@@ -110,7 +110,9 @@ def cmd_snipe(args, cfg) -> int:
         checker = MayhemChecker(cfg.live.rpc_url)
     engine = SniperEngine(s, executor, book, paper=not live,
                           kill_switch_file=cfg.general.kill_switch_file, mayhem_checker=checker)
-    feed = PumpPortalFeed(s.feed_url, engine)
+    import os
+
+    feed = PumpPortalFeed(s.feed_url, engine, api_key=os.environ.get("MEMEBOT_PUMPPORTAL_KEY"))
     logging.getLogger(__name__).info(
         "Sniping %s launches in %s mode: %.4f SOL per trade, TP +%.0f%% / SL -%.0f%% / max hold %.0fs",
         "Mayhem" if s.only_mayhem else "all pump.fun", "LIVE" if live else "PAPER",

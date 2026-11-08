@@ -24,7 +24,9 @@ log = logging.getLogger(__name__)
 
 
 class PumpPortalFeed:
-    def __init__(self, url: str, engine: SniperEngine):
+    def __init__(self, url: str, engine: SniperEngine, api_key: str | None = None):
+        if api_key:
+            url += ("&" if "?" in url else "?") + "api-key=" + api_key
         self.url = url
         self.engine = engine
         self.ws = None
@@ -75,7 +77,7 @@ class PumpPortalFeed:
                 try:
                     async with websockets.connect(self.url, ping_interval=20, max_size=2**22) as ws:
                         self.ws = ws
-                        log.info("Connected to %s", self.url)
+                        log.info("Connected to %s", self.url.split("?")[0])
                         backoff = 1.0
                         await self._send({"method": "subscribeNewToken"})
                         if self.subscribed:  # restore after reconnect
@@ -88,7 +90,15 @@ class PumpPortalFeed:
                             if isinstance(ev, dict) and ev.get("mint"):
                                 await self.engine.on_event(ev)
                             elif isinstance(ev, dict) and ev.get("message"):
-                                log.debug("Feed: %s", ev["message"])
+                                msg = str(ev["message"])
+                                if "only available" in msg or "api key" in msg.lower():
+                                    log.error(
+                                        "PumpPortal refused the per-coin trade stream: %s  -> Without trade "
+                                        "data the sniper cannot buy. Set $MEMEBOT_PUMPPORTAL_KEY to a funded "
+                                        "PumpPortal API key.", msg,
+                                    )
+                                else:
+                                    log.debug("Feed: %s", msg)
                 except Exception as exc:  # noqa: BLE001 - CancelledError still propagates
                     log.warning("Feed disconnected (%s); reconnecting in %.0fs", exc, backoff)
                 finally:

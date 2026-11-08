@@ -148,6 +148,12 @@ Mayhem are dropped. Coins whose status can't be confirmed are **never bought**.
 Each launch costs one `getAccountInfo` call, so on busy days use a paid RPC.
 Set `only_mayhem = false` to trade every pump.fun launch with the same filters.
 
+**PumpPortal API key required for trade data.** PumpPortal streams new launches
+for free, but per-coin trade streams (`subscribeTokenTrade`), which the entry and
+exit rules rely on, only work with an API key funded with at least 0.02 SOL.
+Create one at pumpportal.fun and `export MEMEBOT_PUMPPORTAL_KEY=...`. Without
+it, the bot logs an ERROR and never buys.
+
 **Live execution** uses PumpPortal's `trade-local` API: PumpPortal builds the
 transaction, your machine signs it, and it is sent through your own RPC. Your
 key is never uploaded. Use a fast paid RPC, and raise `priority_fee_sol` if
