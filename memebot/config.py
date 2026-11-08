@@ -94,6 +94,7 @@ class LiveConfig:
 class SniperConfig:
     """Real-time pump.fun launch sniper (Mayhem coins). All amounts in SOL."""
 
+    enabled: bool = True
     feed_url: str = "wss://pumpportal.fun/api/data"
     trade_api_url: str = "https://pumpportal.fun/api/trade-local"
     state_file: str = "state/sniper.json"
@@ -106,6 +107,14 @@ class SniperConfig:
     # bonding-curve account on-chain (uses [live] rpc_url).
     mayhem_check_onchain: bool = True
     creator_blacklist: list[str] = field(default_factory=list)
+    # Wallets that bought >= this many different coins within bot_wallet_window_sec
+    # are treated as bots (e.g. the Mayhem AI agent) and ignored in buyer counts.
+    bot_wallet_min_coins: int = 4  # 0 disables
+    bot_wallet_window_sec: float = 900.0
+    # Record every feed event to JSONL for backtesting (python -m memebot backtest).
+    record_events: bool = True
+    events_dir: str = "state/events"
+    record_extra_sec: float = 600.0  # keep recording a coin this long after the strategy drops it
 
     # --- entry: watch a fresh launch, buy only if early flow looks organic ---
     min_age_sec: float = 3.0

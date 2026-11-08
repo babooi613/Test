@@ -172,6 +172,26 @@ Prices come from pool reserves when the feed includes them, otherwise from
 market cap divided by the 1B supply. Both modes share the position cap and the
 daily loss limit. Trades and `snipe-status` are labelled `mayhem` or `graduated`.
 
+### Tuning with real data (record → backtest)
+
+The sniper records every event it receives to `state/events/events-YYYYMMDD.jsonl`.
+After it has run for a few hours:
+
+```bash
+python -m memebot backtest -c config.toml                        # replay with current settings
+python -m memebot backtest -c config.toml --tune mayhem graduated # random-search settings
+```
+
+The replay runs the same engine and paper fills on a simulated clock. Tuning
+searches on the first 60% of the data and scores each candidate on the last 40%,
+which it never saw. A candidate is only worth using if it also makes money on
+that unseen part. Anything that only wins on the training data is overfit.
+
+**Bot wallets.** The Mayhem AI agent and sniper bots buy many coins at once.
+Wallets that bought at least `bot_wallet_min_coins` different coins within
+`bot_wallet_window_sec` are left out of the unique-buyer and top-buyer counts,
+so those filters measure real demand.
+
 ## Tuning tips
 
 - Start with `scan --all` to see why tokens are rejected, then loosen or

@@ -406,3 +406,74 @@ def test_graduated_stop_loss(tmp_path):
         await eng.drain()
         assert book.closed[0].reason.startswith("stop_loss") and book.closed[0].pnl_sol < 0
     asyncio.run(go())
+
+
+# ---------------------------------------------------------------- bots, recording, backtest
+def test_bot_wallets_excluded_from_buyer_stats(tmp_path):
+    async def go():
+        clock = [T0]
+        cfg, book, eng = make_engine(tmp_path, clock, bot_wallet_min_coins=3)
+        coins = [Curve(f"C{i}") for i in range(3)]
+        for c in coins:
+            await eng.on_event(c.create())
+        # The same "agent" wallet buys big in all three coins; a few small organic buyers too.
+        for c in coins:
+            for i in range(10):
+                clock[0] += 0.3
+                await eng.on_event(c.trade("buy", 2.0, "AGENT"))
+        await eng.drain()
+        w = eng.watches["C2"]
+        assert w.top_buyer_share == pytest.approx(1.0)
+        assert eng.bot_wallets_in(w) == {"AGENT"}
+        assert w.buyer_stats(eng.bot_wallets_in(w)) == (0, 0.0)
+        assert book.positions == {}  # agent-only flow never qualifies
+    asyncio.run(go())
+
+
+def test_record_and_replay_matches_live(tmp_path):
+    from memebot.backtest import EventRecorder, load_events, simulate
+
+    async def live():
+        clock = [T0]
+        cfg, book, eng = make_engine(tmp_path, clock)
+        eng.recorder = EventRecorder(tmp_path / "events")
+        c = Curve()
+        await eng.on_event(c.create())
+        for i in range(10):
+            clock[0] += 0.5
+            await eng.on_event(c.trade("buy", 0.3, f"buyer{i}"))
+            await eng.drain()  # like the real feed loop: order tasks run between messages
+        for i in range(6):
+            clock[0] += 0.5
+            await eng.on_event(c.trade("buy", 2.0, f"late{i}"))
+            await eng.drain()
+        eng.recorder.close()
+        return cfg, book
+
+    cfg, book = asyncio.run(live())
+    events = load_events([str(tmp_path / "events" / "*.jsonl")])
+    assert events and events[0]["txType"] == "create"
+    res = simulate(events, cfg, None)
+    assert res.n == 1 and res.trades[0].reason.startswith("take_profit")
+    assert res.pnl == pytest.approx(book.closed[0].pnl_sol, rel=1e-6)
+
+
+def test_tune_finds_profitable_params_on_synthetic_data(tmp_path):
+    from memebot.backtest import tune
+    from memebot.config import GraduatedConfig
+
+    # Build 30 synthetic Mayhem launches: organic pump then +60% follow-through.
+    events, t = [], T0
+    for k in range(30):
+        c = Curve(f"M{k}")
+        events.append({"t": t, **c.create()})
+        for i in range(10):
+            t += 0.5
+            events.append({"t": t, **c.trade("buy", 0.3, f"b{k}_{i}")})
+        for i in range(6):
+            t += 0.5
+            events.append({"t": t, **c.trade("buy", 2.0, f"x{k}_{i}")})
+        t += 200
+    ranked = tune(events, SniperConfig(), GraduatedConfig(), "mayhem", samples=30, min_trades=3, log=lambda *_: None)
+    best = [r for r in ranked if not r.get("current")][0]
+    assert best["train"].pnl > 0 and best["test"].pnl > 0

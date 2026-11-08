@@ -78,6 +78,11 @@ only_mayhem = true
 mayhem_keys = ["isMayhemMode", "is_mayhem_mode", "mayhemMode", "mayhem"]
 mayhem_check_onchain = true   # read is_mayhem_mode from the bonding curve via [live] rpc_url
 creator_blacklist = []
+bot_wallet_min_coins = 4          # wallets buying >= N coins in the window count as bots (0 = off)
+bot_wallet_window_sec = 900.0
+record_events = true              # log every feed event for `memebot backtest`
+events_dir = "state/events"
+record_extra_sec = 600.0
 
 # entry: only buy launches whose first seconds look like organic demand
 min_age_sec = 3.0

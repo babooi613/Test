@@ -114,6 +114,10 @@ def cmd_snipe(args, cfg) -> int:
                           graduated=g if g.enabled else None)
     import os
 
+    if s.record_events:
+        from .backtest import EventRecorder
+
+        engine.recorder = EventRecorder(s.events_dir)
     feed = PumpPortalFeed(s.feed_url, engine, api_key=os.environ.get("MEMEBOT_PUMPPORTAL_KEY"))
     logging.getLogger(__name__).info(
         "Sniping %s launches in %s mode: %.4f SOL per trade, TP +%.0f%% / SL -%.0f%% / max hold %.0fs",
@@ -156,16 +160,57 @@ def cmd_snipe_status(args, cfg) -> int:
     return 0
 
 
+def cmd_backtest(args, cfg) -> int:
+    from .backtest import load_events, recorded_span, simulate, tune
+
+    patterns = args.events or [f"{cfg.sniper.events_dir}/events-*.jsonl"]
+    events = load_events(patterns)
+    print("Data:", recorded_span(events))
+    if not events:
+        return 1
+    res = simulate(events, cfg.sniper, cfg.graduated)
+    print("Current config:")
+    for kind in ("mayhem", "graduated"):
+        print(f"  {kind:<9}", res.by_kind(kind).summary())
+    if not args.tune:
+        return 0
+    for kind in args.tune:
+        print(f"\nTuning {kind} ({args.samples} random configs; train = first 60%, test = last 40%)...")
+        ranked = tune(events, cfg.sniper, cfg.graduated, kind, samples=args.samples,
+                      min_trades=args.min_trades)
+        cur = next((r for r in ranked if r.get("current")), None)
+        if cur:
+            print(f"  current  train: {cur['train'].summary()}\n           test:  {cur['test'].summary()}")
+        good = [r for r in ranked if not r.get("current")]
+        if not good:
+            print("  No configuration was profitable on the training data with enough trades.")
+            continue
+        for i, r in enumerate(good[:5], 1):
+            print(f"  #{i} train: {r['train'].summary()}\n     test:  {r['test'].summary()}")
+            print("     " + ", ".join(f"{k}={v}" for k, v in r["params"].items()))
+        best = good[0]
+        verdict = "HOLDS UP on unseen data" if best["test"].pnl > 0 and best["test"].n >= 3 else \
+            "does NOT hold up on unseen data - likely overfit, don't use"
+        print(f"  Best candidate {verdict}.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="memebot", description="Solana memecoin trading bot")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("run", "scan", "status", "snipe", "snipe-status"):
+    for name in ("run", "scan", "status", "snipe", "snipe-status", "backtest"):
         sp = sub.add_parser(name)
         sp.add_argument("--config", "-c", default=None, help="Path to config TOML")
         if name in ("run", "snipe"):
             sp.add_argument("--live", action="store_true", help="Confirm live trading with real funds")
         if name == "run":
             sp.add_argument("--once", action="store_true", help="Run a single tick and exit")
+        if name == "backtest":
+            sp.add_argument("--events", nargs="*", help="JSONL files/globs (default: recorded events)")
+            sp.add_argument("--tune", nargs="*", choices=["mayhem", "graduated"],
+                            help="Random-search parameters for these modes")
+            sp.add_argument("--samples", type=int, default=200)
+            sp.add_argument("--min-trades", type=int, default=8)
         if name == "scan":
             sp.add_argument("--all", action="store_true", help="Also show rejected tokens")
     args = parser.parse_args(argv)
@@ -173,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
     _setup_logging(cfg.general.log_level)
     return {
         "run": cmd_run, "scan": cmd_scan, "status": cmd_status,
-        "snipe": cmd_snipe, "snipe-status": cmd_snipe_status,
+        "snipe": cmd_snipe, "snipe-status": cmd_snipe_status, "backtest": cmd_backtest,
     }[args.command](args, cfg)
 
 

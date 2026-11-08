@@ -102,6 +102,14 @@ class TokenWatch:
     def top_buyer_share(self) -> float:
         return max(self.buyer_sol.values()) / self.buy_sol if self.buyer_sol and self.buy_sol else 0.0
 
+    def buyer_stats(self, exclude: set[str] | frozenset[str] = frozenset()) -> tuple[int, float]:
+        """(unique buyers, top buyer's share of buy volume) ignoring `exclude` wallets
+        (e.g. bots / the Mayhem agent that trade many coins at once)."""
+        organic = {k: v for k, v in self.buyer_sol.items() if k not in exclude}
+        total = sum(organic.values())
+        top = max(organic.values()) / total if organic and total else 0.0
+        return len(organic), top
+
     def _update_curve(self, ev: dict[str, Any]) -> None:
         vs, vt = _f(ev.get("vSolInBondingCurve")), _f(ev.get("vTokensInBondingCurve"))
         if vs > 0 and vt > 0:
@@ -167,7 +175,8 @@ class TokenWatch:
         self.last_trade_at = now
 
 
-def entry_rejections(w: TokenWatch, cfg: SniperConfig, now: float) -> list[str]:
+def entry_rejections(w: TokenWatch, cfg: SniperConfig, now: float,
+                     exclude: set[str] | frozenset[str] = frozenset()) -> list[str]:
     r: list[str] = []
     age = w.age(now)
     if age < cfg.min_age_sec:
@@ -182,14 +191,15 @@ def entry_rejections(w: TokenWatch, cfg: SniperConfig, now: float) -> list[str]:
         r.append("dev sold")
     if w.buys < cfg.min_buys:
         r.append(f"buys {w.buys} < {cfg.min_buys}")
-    if w.unique_buyers < cfg.min_unique_buyers:
-        r.append(f"unique buyers {w.unique_buyers} < {cfg.min_unique_buyers}")
+    buyers, top_share = w.buyer_stats(exclude)
+    if buyers < cfg.min_unique_buyers:
+        r.append(f"unique buyers {buyers} < {cfg.min_unique_buyers}")
     if w.buy_sol < cfg.min_buy_volume_sol:
         r.append(f"buy volume {w.buy_sol:.2f} < {cfg.min_buy_volume_sol} SOL")
     if w.buy_volume_ratio < cfg.min_buy_volume_ratio:
         r.append(f"buy ratio {w.buy_volume_ratio:.2f} < {cfg.min_buy_volume_ratio}")
-    if w.top_buyer_share > cfg.max_top_buyer_share:
-        r.append(f"top buyer {w.top_buyer_share:.0%} of volume")
+    if top_share > cfg.max_top_buyer_share:
+        r.append(f"top buyer {top_share:.0%} of volume")
     if not (cfg.min_mcap_sol <= w.mcap_sol <= cfg.max_mcap_sol):
         r.append(f"mcap {w.mcap_sol:.1f} SOL out of range")
     if w.launch_price and w.price:
@@ -390,9 +400,19 @@ class SniperEngine:
         self.unsubscribe = None
         self.stats = {"launches": 0, "mayhem": 0, "graduated": 0, "buys": 0, "sells": 0}
         self._warned_no_mayhem = False
+        self.recorder = None  # optional callable(event, now) - see EventRecorder
+        self.record_only: dict[str, float] = {}  # mint -> created_at, kept subscribed for recording
+        self.wallet_mints: dict[str, dict[str, float]] = {}  # buyer -> {mint: last seen}
+        self._last_wallet_prune = 0.0
 
     # ---- feed callbacks ------------------------------------------------
     async def on_event(self, ev: dict[str, Any]) -> None:
+        if self.recorder is not None:
+            try:
+                self.recorder(ev, self.clock())
+            except Exception:  # noqa: BLE001
+                log.exception("Event recorder failed; disabling it")
+                self.recorder = None
         tx = ev.get("txType")
         if tx == "create":
             await self.on_create(ev)
@@ -410,6 +430,8 @@ class SniperEngine:
         if w.mayhem:
             self.stats["mayhem"] += 1
         self._maybe_warn_no_mayhem()
+        if not getattr(self.cfg, "enabled", True):
+            return
         if self.cfg.only_mayhem:
             if w.mayhem is False:
                 return
@@ -474,6 +496,9 @@ class SniperEngine:
         if w.kind == "graduated" and ev.get("symbol") and w.symbol == w.mint[:6]:
             w.symbol = str(ev["symbol"])[:16]
         w.apply_trade(ev, now)
+        trader = ev.get("traderPublicKey")
+        if ev.get("txType") == "buy" and trader:
+            self.wallet_mints.setdefault(trader, {})[w.mint] = now
         if w.mint in self.book.positions:
             self._check_exit(w.mint, now)
         else:
@@ -484,6 +509,15 @@ class SniperEngine:
         now = self.clock()
         for mint in list(self.book.positions):
             self._check_exit(mint, now)
+        if now - self._last_wallet_prune > 30:
+            self._last_wallet_prune = now
+            horizon = now - self.cfg.bot_wallet_window_sec
+            for wallet in list(self.wallet_mints):
+                seen = {m: t for m, t in self.wallet_mints[wallet].items() if t >= horizon}
+                if seen:
+                    self.wallet_mints[wallet] = seen
+                else:
+                    del self.wallet_mints[wallet]
         stale = [
             m for m, w in self.watches.items()
             if m not in self.book.positions and m not in self.pending
@@ -499,8 +533,17 @@ class SniperEngine:
                     (w.peak_price / lp - 1) * 100, (w.price / lp - 1) * 100, w.dev_sold,
                     "; ".join(w.last_rejections[:3]) or "no trades in window",
                 )
-        if stale and self.unsubscribe:
-            await self.unsubscribe(stale)
+        # Keep recording a coin's trades for a while after the strategy stops watching it,
+        # so backtests can try longer entry windows / hold times.
+        extra = self.cfg.record_extra_sec if self.recorder is not None else 0.0
+        for m in stale:
+            self.record_only[m] = now
+        drop = [m for m, since in self.record_only.items() if now - since >= extra]
+        for m in drop:
+            del self.record_only[m]
+        drop = [m for m in drop if m not in self.watches]
+        if drop and self.unsubscribe:
+            await self.unsubscribe(drop)
 
     # ---- decisions -----------------------------------------------------
     def entry_block_reason(self, now: float) -> str | None:
@@ -518,7 +561,7 @@ class SniperEngine:
     def _check_entry(self, w: TokenWatch, now: float) -> None:
         if w.mint in self.book.attempted or w.mint in self.pending:
             return
-        rej = entry_rejections(w, self.cfg_for(w.kind), now)
+        rej = entry_rejections(w, self.cfg_for(w.kind), now, self.bot_wallets_in(w))
         if rej:
             if not any(x.startswith("too early") for x in rej):
                 w.last_rejections = rej
@@ -528,6 +571,13 @@ class SniperEngine:
         self.book.attempted.add(w.mint)
         self.pending.add(w.mint)
         self._spawn(self._do_buy(w))
+
+    def bot_wallets_in(self, w: TokenWatch) -> set[str]:
+        """Buyers of this coin that also bought >= bot_wallet_min_coins different coins recently."""
+        n = self.cfg.bot_wallet_min_coins
+        if n <= 0:
+            return set()
+        return {b for b in w.buyer_sol if len(self.wallet_mints.get(b, ())) >= n}
 
     def _check_exit(self, mint: str, now: float) -> None:
         if mint in self.pending:
