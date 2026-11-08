@@ -146,9 +146,41 @@ class SniperConfig:
 
 
 @dataclass
+class GraduatedConfig(SniperConfig):
+    """Trading coins right after they graduate from the bonding curve to PumpSwap.
+
+    Same fields as [sniper]; only the defaults differ. Position count, daily loss
+    limit, paper balance and execution settings are taken from [sniper].
+    """
+
+    enabled: bool = True
+    only_mayhem: bool = False
+    min_age_sec: float = 5.0  # seconds since migration
+    max_age_sec: float = 300.0
+    min_buys: int = 15
+    min_unique_buyers: int = 10
+    min_buy_volume_sol: float = 5.0
+    min_buy_volume_ratio: float = 0.60
+    max_top_buyer_share: float = 0.35
+    max_mcap_sol: float = 5000.0
+    max_gain_since_launch_pct: float = 100.0  # measured from first post-migration trade
+    require_dev_holding: bool = False  # migrate events don't name the creator
+    take_profit_pct: float = 30.0
+    stop_loss_pct: float = 15.0
+    trailing_activation_pct: float = 15.0
+    trailing_stop_pct: float = 10.0
+    max_hold_sec: float = 300.0
+    exit_on_dev_sell: bool = False
+    watch_ttl_sec: float = 330.0
+    paper_fee_pct: float = 0.5  # PumpSwap fees are lower than the bonding curve
+    paper_latency_slippage_pct: float = 2.0
+
+
+@dataclass
 class Config:
     general: GeneralConfig = field(default_factory=GeneralConfig)
     sniper: SniperConfig = field(default_factory=SniperConfig)
+    graduated: GraduatedConfig = field(default_factory=GraduatedConfig)
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     filters: FilterConfig = field(default_factory=FilterConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)

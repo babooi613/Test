@@ -115,3 +115,29 @@ paper_latency_slippage_pct = 3.0
 slippage_pct = 15
 priority_fee_sol = 0.0005
 pool = "auto"
+
+# ---------------------------------------------------------------------------
+# Graduated coins: trade right after a coin completes its bonding curve and
+# migrates to PumpSwap. Same keys as [sniper]; ages are seconds since migration.
+# Shares max_open_positions / daily_loss_limit_sol / paper balance with [sniper].
+# ---------------------------------------------------------------------------
+[graduated]
+enabled = true
+min_age_sec = 5.0
+max_age_sec = 300.0
+min_buys = 15
+min_unique_buyers = 10
+min_buy_volume_sol = 5.0
+min_buy_volume_ratio = 0.60
+max_top_buyer_share = 0.35
+max_mcap_sol = 5000.0
+max_gain_since_launch_pct = 100.0
+take_profit_pct = 30.0
+stop_loss_pct = 15.0
+trailing_activation_pct = 15.0
+trailing_stop_pct = 10.0
+max_hold_sec = 300.0
+buy_sol = 0.05
+watch_ttl_sec = 330.0
+paper_fee_pct = 0.5
+paper_latency_slippage_pct = 2.0

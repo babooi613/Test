@@ -22,7 +22,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from .config import SniperConfig
+from .config import GraduatedConfig, SniperConfig
+
+PUMP_TOTAL_SUPPLY = 1_000_000_000  # pump.fun coins: 1B tokens, so price = mcap / 1B
 
 log = logging.getLogger(__name__)
 
@@ -71,11 +73,18 @@ class TokenWatch:
     last_trade_at: float = 0.0
     peak_price: float = 0.0
     last_rejections: list[str] = field(default_factory=list)
+    kind: str = "mayhem"  # "mayhem" (fresh launch) or "graduated" (just migrated to PumpSwap)
+
+    @property
+    def has_reserves(self) -> bool:
+        return self.v_sol > 0 and self.v_tokens > 0
 
     @property
     def price(self) -> float:
-        """Price in SOL per token from the bonding curve reserves."""
-        return self.v_sol / self.v_tokens if self.v_tokens else 0.0
+        """SOL per token: from curve reserves if known, else market cap / supply."""
+        if self.has_reserves:
+            return self.v_sol / self.v_tokens
+        return self.mcap_sol / PUMP_TOTAL_SUPPLY if self.mcap_sol > 0 else 0.0
 
     def age(self, now: float) -> float:
         return now - self.created_at
@@ -97,10 +106,14 @@ class TokenWatch:
         vs, vt = _f(ev.get("vSolInBondingCurve")), _f(ev.get("vTokensInBondingCurve"))
         if vs > 0 and vt > 0:
             self.v_sol, self.v_tokens = vs, vt
-            self.peak_price = max(self.peak_price, vs / vt)
         mc = _f(ev.get("marketCapSol"))
         if mc > 0:
             self.mcap_sol = mc
+        p = self.price
+        if p > 0:
+            self.peak_price = max(self.peak_price, p)
+            if not self.launch_price:
+                self.launch_price = p  # graduated coins: first post-migration price
 
     @classmethod
     def from_create(cls, ev: dict[str, Any], now: float, mayhem_keys: list[str]) -> "TokenWatch":
@@ -116,6 +129,21 @@ class TokenWatch:
         )
         w._update_curve(ev)
         w.launch_price = w.price
+        return w
+
+    @classmethod
+    def from_migrate(cls, ev: dict[str, Any], now: float) -> "TokenWatch":
+        w = cls(
+            mint=ev.get("mint", ""),
+            symbol=str(ev.get("symbol") or ev.get("mint", "?")[:6]),
+            name=str(ev.get("name", "")),
+            creator=ev.get("traderPublicKey", "") if ev.get("traderPublicKey") else "",
+            created_at=now,
+            mayhem=None,
+            last_trade_at=now,
+            kind="graduated",
+        )
+        w._update_curve(ev)
         return w
 
     def apply_trade(self, ev: dict[str, Any], now: float) -> None:
@@ -186,6 +214,7 @@ class SnipePosition:
     opened_at: float
     peak_price: float
     signature: str | None = None
+    kind: str = "mayhem"
 
     def pnl_pct(self, price: float) -> float:
         return (price / self.entry_price - 1) * 100 if self.entry_price else 0.0
@@ -201,6 +230,7 @@ class SnipeTrade:
     closed_at: float
     reason: str
     signatures: list[str] = field(default_factory=list)
+    kind: str = "mayhem"
 
     @property
     def pnl_sol(self) -> float:
@@ -297,24 +327,38 @@ class PaperSnipeExecutor:
     """Simulates fills against the constant-product bonding curve, plus fees and
     an extra latency haircut (real bots will usually get in/out before you)."""
 
-    def __init__(self, cfg: SniperConfig):
+    def __init__(self, cfg: SniperConfig, graduated: SniperConfig | None = None):
         self.cfg = cfg
+        self.graduated = graduated or cfg
+
+    def _cfg(self, kind: str) -> SniperConfig:
+        return self.graduated if kind == "graduated" else self.cfg
 
     def buy(self, w: TokenWatch, sol_amount: float) -> SnipeFill | None:
-        if w.v_sol <= 0 or w.v_tokens <= 0:
+        c = self._cfg(w.kind)
+        net = sol_amount * (1 - c.paper_fee_pct / 100)
+        if w.has_reserves:
+            k = w.v_sol * w.v_tokens
+            tokens = w.v_tokens - k / (w.v_sol + net)
+        elif w.price > 0:  # no reserves in the feed: price-based fill
+            tokens = net / w.price
+        else:
             return None
-        net = sol_amount * (1 - self.cfg.paper_fee_pct / 100)
-        k = w.v_sol * w.v_tokens
-        tokens = w.v_tokens - k / (w.v_sol + net)
-        tokens *= 1 - self.cfg.paper_latency_slippage_pct / 100
+        tokens *= 1 - c.paper_latency_slippage_pct / 100
         return SnipeFill(tokens=tokens, sol=sol_amount)
 
     def sell(self, pos: SnipePosition, w: TokenWatch | None) -> SnipeFill | None:
-        if w is None or w.v_sol <= 0 or w.v_tokens <= 0:
+        if w is None:
             return None
-        k = w.v_sol * w.v_tokens
-        sol_out = w.v_sol - k / (w.v_tokens + pos.tokens)
-        sol_out *= (1 - self.cfg.paper_fee_pct / 100) * (1 - self.cfg.paper_latency_slippage_pct / 100)
+        c = self._cfg(pos.kind)
+        if w.has_reserves:
+            k = w.v_sol * w.v_tokens
+            sol_out = w.v_sol - k / (w.v_tokens + pos.tokens)
+        elif w.price > 0:
+            sol_out = pos.tokens * w.price
+        else:
+            return None
+        sol_out *= (1 - c.paper_fee_pct / 100) * (1 - c.paper_latency_slippage_pct / 100)
         return SnipeFill(tokens=pos.tokens, sol=max(sol_out, 0.0))
 
 
@@ -330,8 +374,9 @@ class SniperEngine:
 
     def __init__(self, cfg: SniperConfig, executor: SnipeExecutor, book: SnipeBook,
                  paper: bool = True, kill_switch_file: str = "STOP", clock=time.time,
-                 mayhem_checker=None):
+                 mayhem_checker=None, graduated: GraduatedConfig | None = None):
         self.cfg = cfg
+        self.grad_cfg = graduated  # None = graduated mode off
         self.executor = executor
         self.book = book
         self.paper = paper
@@ -343,7 +388,7 @@ class SniperEngine:
         self.tasks: set[asyncio.Task] = set()
         self.subscribe = None  # set by feed: async fn(list[str])
         self.unsubscribe = None
-        self.stats = {"launches": 0, "mayhem": 0, "buys": 0, "sells": 0}
+        self.stats = {"launches": 0, "mayhem": 0, "graduated": 0, "buys": 0, "sells": 0}
         self._warned_no_mayhem = False
 
     # ---- feed callbacks ------------------------------------------------
@@ -351,6 +396,8 @@ class SniperEngine:
         tx = ev.get("txType")
         if tx == "create":
             await self.on_create(ev)
+        elif tx == "migrate":
+            await self.on_migrate(ev)
         elif tx in ("buy", "sell") and ev.get("mint") in self.watches:
             self.on_trade(ev)
 
@@ -375,6 +422,21 @@ class SniperEngine:
             return
         self.watches[w.mint] = w
         log.debug("Watching %s (%s) mcap=%.1f SOL", w.symbol, w.mint, w.mcap_sol)
+        if self.subscribe:
+            await self.subscribe([w.mint])
+
+    def cfg_for(self, kind: str) -> SniperConfig:
+        return self.grad_cfg if kind == "graduated" and self.grad_cfg else self.cfg
+
+    async def on_migrate(self, ev: dict[str, Any]) -> None:
+        if not (self.grad_cfg and getattr(self.grad_cfg, "enabled", True)):
+            return
+        w = TokenWatch.from_migrate(ev, self.clock())
+        if not w.mint or w.mint in self.book.positions:
+            return
+        self.stats["graduated"] += 1
+        self.watches[w.mint] = w
+        log.info("GRADUATED %s - watching post-migration trades", w.mint)
         if self.subscribe:
             await self.subscribe([w.mint])
 
@@ -409,6 +471,8 @@ class SniperEngine:
     def on_trade(self, ev: dict[str, Any]) -> None:
         now = self.clock()
         w = self.watches[ev["mint"]]
+        if w.kind == "graduated" and ev.get("symbol") and w.symbol == w.mint[:6]:
+            w.symbol = str(ev["symbol"])[:16]
         w.apply_trade(ev, now)
         if w.mint in self.book.positions:
             self._check_exit(w.mint, now)
@@ -423,15 +487,15 @@ class SniperEngine:
         stale = [
             m for m, w in self.watches.items()
             if m not in self.book.positions and m not in self.pending
-            and w.age(now) > max(self.cfg.watch_ttl_sec, self.cfg.max_age_sec)
+            and w.age(now) > max(self.cfg_for(w.kind).watch_ttl_sec, self.cfg_for(w.kind).max_age_sec)
         ]
         for m in stale:
             w = self.watches.pop(m)
-            if w.mayhem and m not in self.book.attempted:
+            if (w.mayhem or w.kind == "graduated") and m not in self.book.attempted:
                 lp = w.launch_price or 1
                 log.info(
-                    "PASSED %-10s buys=%d sells=%d buyers=%d vol=%.2f SOL peak=%+.0f%% now=%+.0f%% dev_sold=%s | %s",
-                    w.symbol, w.buys, w.sells, w.unique_buyers, w.buy_sol,
+                    "PASSED %-9s %-10s buys=%d sells=%d buyers=%d vol=%.2f SOL peak=%+.0f%% now=%+.0f%% dev_sold=%s | %s",
+                    w.kind, w.symbol, w.buys, w.sells, w.unique_buyers, w.buy_sol,
                     (w.peak_price / lp - 1) * 100, (w.price / lp - 1) * 100, w.dev_sold,
                     "; ".join(w.last_rejections[:3]) or "no trades in window",
                 )
@@ -454,7 +518,7 @@ class SniperEngine:
     def _check_entry(self, w: TokenWatch, now: float) -> None:
         if w.mint in self.book.attempted or w.mint in self.pending:
             return
-        rej = entry_rejections(w, self.cfg, now)
+        rej = entry_rejections(w, self.cfg_for(w.kind), now)
         if rej:
             if not any(x.startswith("too early") for x in rej):
                 w.last_rejections = rej
@@ -469,7 +533,7 @@ class SniperEngine:
         if mint in self.pending:
             return
         pos = self.book.positions[mint]
-        reason = exit_reason(pos, self.watches.get(mint), self.cfg, now)
+        reason = exit_reason(pos, self.watches.get(mint), self.cfg_for(pos.kind), now)
         if reason:
             self.pending.add(mint)
             self._spawn(self._do_sell(mint, reason))
@@ -486,19 +550,19 @@ class SniperEngine:
 
     async def _do_buy(self, w: TokenWatch) -> None:
         try:
-            fill = await asyncio.to_thread(self.executor.buy, w, self.cfg.buy_sol)
+            fill = await asyncio.to_thread(self.executor.buy, w, self.cfg_for(w.kind).buy_sol)
             if fill is None or fill.tokens <= 0:
                 return
             now = self.clock()
             entry = fill.sol / fill.tokens
             self.book.positions[w.mint] = SnipePosition(
-                w.mint, w.symbol, entry, fill.tokens, fill.sol, now, entry, fill.signature
+                w.mint, w.symbol, entry, fill.tokens, fill.sol, now, entry, fill.signature, w.kind
             )
             self.book.sol_balance -= fill.sol
             self.stats["buys"] += 1
             log.info(
-                "BUY  %-10s %.4f SOL  age=%.1fs buys=%d buyers=%d vol=%.2f SOL mcap=%.1f SOL  %s",
-                w.symbol, fill.sol, w.age(now), w.buys, w.unique_buyers, w.buy_sol, w.mcap_sol, w.mint,
+                "BUY  %-9s %-10s %.4f SOL  age=%.1fs buys=%d buyers=%d vol=%.2f SOL mcap=%.1f SOL  %s",
+                w.kind, w.symbol, fill.sol, w.age(now), w.buys, w.unique_buyers, w.buy_sol, w.mcap_sol, w.mint,
             )
             self._save()
         except Exception:  # noqa: BLE001
@@ -519,14 +583,14 @@ class SniperEngine:
             del self.book.positions[mint]
             trade = SnipeTrade(
                 mint, pos.symbol, pos.cost_sol, fill.sol, pos.opened_at, now, reason,
-                [s for s in (pos.signature, fill.signature) if s],
+                [s for s in (pos.signature, fill.signature) if s], pos.kind,
             )
             self.book.closed.append(trade)
             self.book.sol_balance += fill.sol
             self.stats["sells"] += 1
             log.info(
-                "SELL %-10s %+.4f SOL (%+.1f%%) held=%.0fs  %s",
-                pos.symbol, trade.pnl_sol, trade.pnl_pct, now - pos.opened_at, reason,
+                "SELL %-9s %-10s %+.4f SOL (%+.1f%%) held=%.0fs  %s",
+                pos.kind, pos.symbol, trade.pnl_sol, trade.pnl_pct, now - pos.opened_at, reason,
             )
             self._save()
         except Exception:  # noqa: BLE001

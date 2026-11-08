@@ -101,7 +101,8 @@ def cmd_snipe(args, cfg) -> int:
     if live != bool(args.live):
         print("Live sniping needs BOTH general.mode = \"live\" in the config AND the --live flag.")
         return 2
-    executor = PumpPortalExecutor(s, cfg.live) if live else PaperSnipeExecutor(s)
+    g = cfg.graduated
+    executor = PumpPortalExecutor(s, cfg.live) if live else PaperSnipeExecutor(s, g)
     book = SnipeBook.load(s.state_file, 0.0 if live else s.paper_starting_sol)
     checker = None
     if s.only_mayhem and s.mayhem_check_onchain:
@@ -109,7 +110,8 @@ def cmd_snipe(args, cfg) -> int:
 
         checker = MayhemChecker(cfg.live.rpc_url)
     engine = SniperEngine(s, executor, book, paper=not live,
-                          kill_switch_file=cfg.general.kill_switch_file, mayhem_checker=checker)
+                          kill_switch_file=cfg.general.kill_switch_file, mayhem_checker=checker,
+                          graduated=g if g.enabled else None)
     import os
 
     feed = PumpPortalFeed(s.feed_url, engine, api_key=os.environ.get("MEMEBOT_PUMPPORTAL_KEY"))
@@ -118,6 +120,11 @@ def cmd_snipe(args, cfg) -> int:
         "Mayhem" if s.only_mayhem else "all pump.fun", "LIVE" if live else "PAPER",
         s.buy_sol, s.take_profit_pct, s.stop_loss_pct, s.max_hold_sec,
     )
+    if g.enabled:
+        logging.getLogger(__name__).info(
+            "Graduated mode ON: %.4f SOL per trade, TP +%.0f%% / SL -%.0f%% / max hold %.0fs",
+            g.buy_sol, g.take_profit_pct, g.stop_loss_pct, g.max_hold_sec,
+        )
     try:
         asyncio.run(feed.run())
     except KeyboardInterrupt:
@@ -145,7 +152,7 @@ def cmd_snipe_status(args, cfg) -> int:
         print("  (none)")
     print("\nLast 15 trades:")
     for t in book.closed[-15:]:
-        print(f"  {t.symbol:<10} {t.pnl_sol:+.4f} SOL ({t.pnl_pct:+6.1f}%) {t.closed_at - t.opened_at:4.0f}s  {t.reason}")
+        print(f"  {t.kind:<9} {t.symbol:<10} {t.pnl_sol:+.4f} SOL ({t.pnl_pct:+6.1f}%) {t.closed_at - t.opened_at:4.0f}s  {t.reason}")
     return 0
 
 

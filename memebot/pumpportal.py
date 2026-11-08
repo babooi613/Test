@@ -62,8 +62,8 @@ class PumpPortalFeed:
                 last_status = time.time()
                 s, b = self.engine.stats, self.engine.book
                 log.info(
-                    "launches=%d mayhem=%d watching=%d open=%d buys=%d sells=%d pnl_today=%+.4f SOL",
-                    s["launches"], s["mayhem"], len(self.engine.watches), len(b.positions),
+                    "launches=%d mayhem=%d graduated=%d watching=%d open=%d buys=%d sells=%d pnl_today=%+.4f SOL",
+                    s["launches"], s["mayhem"], s["graduated"], len(self.engine.watches), len(b.positions),
                     s["buys"], s["sells"], b.pnl_today(time.time()),
                 )
 
@@ -80,6 +80,8 @@ class PumpPortalFeed:
                         log.info("Connected to %s", self.url.split("?")[0])
                         backoff = 1.0
                         await self._send({"method": "subscribeNewToken"})
+                        if self.engine.grad_cfg is not None and getattr(self.engine.grad_cfg, "enabled", True):
+                            await self._send({"method": "subscribeMigration"})
                         if self.subscribed:  # restore after reconnect
                             await self._send({"method": "subscribeTokenTrade", "keys": sorted(self.subscribed)})
                         async for raw in ws:

@@ -334,3 +334,75 @@ def test_engine_never_buys_unconfirmed(tmp_path):
         await organic_pump(eng, c, clock)
         assert book.positions == {}
     asyncio.run(go())
+
+
+# ---------------------------------------------------------------- graduated mode
+def make_grad_engine(tmp_path, clock):
+    from memebot.config import GraduatedConfig
+    cfg = SniperConfig(state_file=str(tmp_path / "sniper.json"))
+    g = GraduatedConfig()
+    book = SnipeBook(5.0)
+    eng = SniperEngine(cfg, PaperSnipeExecutor(cfg, g), book, paper=True,
+                       kill_switch_file=str(tmp_path / "STOP"), clock=lambda: clock[0], graduated=g)
+    return g, book, eng
+
+
+def _grad_trade(mint, side, sol, trader, mcap, reserves=None):
+    ev = {"txType": side, "mint": mint, "traderPublicKey": trader, "solAmount": sol,
+          "marketCapSol": mcap, "pool": "pump-amm"}
+    if reserves:
+        ev["vSolInBondingCurve"], ev["vTokensInBondingCurve"] = reserves
+    return ev
+
+
+@pytest.mark.parametrize("with_reserves", [False, True])
+def test_graduated_cycle(tmp_path, with_reserves):
+    async def go():
+        clock = [T0]
+        g, book, eng = make_grad_engine(tmp_path, clock)
+        await eng.on_event({"txType": "migrate", "mint": "GRAD", "pool": "pump-amm"})
+        assert eng.watches["GRAD"].kind == "graduated"
+        mcap = 420.0
+        for i in range(16):  # steady organic buying after migration
+            clock[0] += 1
+            mcap *= 1.005
+            res = (85 * mcap / 420, 206e6 * 420 / mcap) if with_reserves else None
+            await eng.on_event(_grad_trade("GRAD", "buy", 0.5, f"b{i}", mcap, res))
+        await eng.drain()
+        assert "GRAD" in book.positions and book.positions["GRAD"].kind == "graduated"
+        for i in range(5):  # price runs +40%
+            clock[0] += 1
+            mcap *= 1.08
+            res = (85 * mcap / 420, 206e6 * 420 / mcap) if with_reserves else None
+            await eng.on_event(_grad_trade("GRAD", "buy", 3.0, f"x{i}", mcap, res))
+        await eng.drain()
+        t = book.closed[0]
+        assert t.kind == "graduated" and t.reason.startswith("take_profit") and t.pnl_sol > 0
+    asyncio.run(go())
+
+
+def test_graduated_disabled_ignores_migrations(tmp_path):
+    async def go():
+        clock = [T0]
+        cfg, book, eng = make_engine(tmp_path, clock)  # no graduated config
+        await eng.on_event({"txType": "migrate", "mint": "GRAD", "pool": "pump-amm"})
+        assert "GRAD" not in eng.watches
+    asyncio.run(go())
+
+
+def test_graduated_stop_loss(tmp_path):
+    async def go():
+        clock = [T0]
+        g, book, eng = make_grad_engine(tmp_path, clock)
+        await eng.on_event({"txType": "migrate", "mint": "G2", "pool": "pump-amm"})
+        mcap = 420.0
+        for i in range(16):
+            clock[0] += 1
+            await eng.on_event(_grad_trade("G2", "buy", 0.5, f"b{i}", mcap))
+        await eng.drain()
+        assert "G2" in book.positions
+        clock[0] += 1
+        await eng.on_event(_grad_trade("G2", "sell", 20, "dumper", mcap * 0.8))
+        await eng.drain()
+        assert book.closed[0].reason.startswith("stop_loss") and book.closed[0].pnl_sol < 0
+    asyncio.run(go())

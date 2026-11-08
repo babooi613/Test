@@ -159,6 +159,19 @@ transaction, your machine signs it, and it is sent through your own RPC. Your
 key is never uploaded. Use a fast paid RPC, and raise `priority_fee_sol` if
 your transactions land late.
 
+### Graduated coins
+
+With `[graduated] enabled = true`, the sniper also subscribes to PumpPortal's
+migration feed. When a coin completes its bonding curve and moves to PumpSwap,
+the bot watches its trades for `max_age_sec` (default 5 minutes) and buys only
+on sustained, spread-out buying: at least 15 buys from at least 10 wallets, at
+least 5 SOL of volume, at least 60% of volume from buys, and no wallet above 35%
+of buying. Exits are tighter than for Mayhem coins (TP +30%, SL −15%, trail 10%
+after +15%, max hold 5 min), because the drop right after migration is common.
+Prices come from pool reserves when the feed includes them, otherwise from
+market cap divided by the 1B supply. Both modes share the position cap and the
+daily loss limit. Trades and `snipe-status` are labelled `mayhem` or `graduated`.
+
 ## Tuning tips
 
 - Start with `scan --all` to see why tokens are rejected, then loosen or
